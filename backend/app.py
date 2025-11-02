@@ -10,13 +10,19 @@ import os
 app = Flask(__name__)
 CORS(app)
 
-with open('config.json', 'r', encoding='utf-8') as f:
-    config = json.load(f)
-
-IAM_TOKEN = config['IAM_TOKEN']
 
 FOLDER_ID = "b1g6grqlei218ful6p26"
 MODEL = "yandexgpt-lite"
+
+try:
+    with open('config.json', 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    IAM_TOKEN = config['IAM_TOKEN']
+
+except FileNotFoundError:
+    IAM_TOKEN = os.environ.get('IAM_TOKEN')
+    if not IAM_TOKEN:
+        raise ValueError("Переменная IAM_TOKEN не задана ни в config.json, ни в окружении")
 
 def ask_yandex_gpt(prompt):
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
