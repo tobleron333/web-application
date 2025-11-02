@@ -29,7 +29,7 @@ function App() {
     formData.append("file", file);
 
     try {
-      const response = await fetch("https://web-application-zlw4.onrender.com", {
+      const response = await fetch("https://web-application-xihu.onrender.com", {
         method: "POST",
         body: formData,
       });
