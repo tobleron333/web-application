@@ -35,10 +35,10 @@ if not API_KEY:
     raise ValueError("Переменная YANDEX_API_KEY не задана в окружении")
 
 def get_iam_token():
-    url = "https://iam.api.cloud.yandex.net/iam/v1/token"
     headers = {"Content-Type": "application/json"}
     data = {"api_key": API_KEY}
     try:
+        print(f"Запрос IAM-токена: {IAM_TOKEN_URL}")
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         return response.json()["iamToken"]
