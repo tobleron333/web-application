@@ -29,7 +29,6 @@ function App() {
         formData.append("file", file);
 
         try {
-            // Исправлен URL: добавлен путь и корректный протокол
             const response = await fetch("https://web-application-xihu.onrender.com/process-csv", {
                 method: "POST",
                 body: formData,
