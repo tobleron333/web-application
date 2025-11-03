@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 import time
 import os
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 CORS(app)
@@ -11,6 +12,23 @@ CORS(app)
 FOLDER_ID = "b1g6grqlei218ful6p26"
 MODEL = "yandexgpt-lite"
 
+IAM_TOKEN_URL = os.environ.get(
+    "IAM_TOKEN_URL",
+    "https://iam.api.cloud.yandex.net/iam/v1/token"
+)
+def validate_url(url):
+    try:
+        result = urlparse(url)
+        if all([result.scheme, result.netloc]):
+            return True
+        else:
+            raise ValueError(f"Некорректный URL: {url}")
+    except Exception as e:
+        print(f"Ошибка валидации URL: {e}")
+        return False
+
+if not validate_url(IAM_TOKEN_URL):
+    raise ValueError(f"Неверный URL для IAM: {IAM_TOKEN_URL}")
 
 API_KEY = os.environ.get("YANDEX_API_KEY")
 if not API_KEY:
