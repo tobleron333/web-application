@@ -16,6 +16,7 @@ IAM_TOKEN_URL = os.environ.get(
     "IAM_TOKEN_URL",
     "https://iam.api.cloud.yandex.net/iam/v1/token"
 )
+
 def validate_url(url):
     try:
         result = urlparse(url)
@@ -39,16 +40,16 @@ def get_iam_token():
     data = {"api_key": API_KEY}
     try:
         print(f"Запрос IAM-токена: {IAM_TOKEN_URL}")
-        response = requests.post(url, json=data, headers=headers)
+        response = requests.post(IAM_TOKEN_URL, json=data, headers=headers)  # Здесь исправлена передача URL
         response.raise_for_status()
         return response.json()["iamToken"]
     except requests.exceptions.RequestException as e:
-        print(f"Ошибка получения IAM‑токена: {e}")
+        print(f"Ошибка получения IAM-токена: {e}")
         raise
 
 def ask_yandex_gpt(prompt):
     try:
-        # Получаем свежий IAM‑токен перед каждым запросом
+        # Получаем свежий IAM-токен перед каждым запросом
         IAM_TOKEN = get_iam_token()
     except Exception as e:
         return f"Ошибка аутентификации: {e}"
@@ -110,13 +111,11 @@ def process_csv():
     if 'file' not in request.files:
         return {'error': 'Файл не загружен'}, 400
 
-
     file = request.files['file']
     try:
         df = pd.read_csv(file, sep=';', dtype={'№ вопроса': 'Int64'})
     except Exception as e:
         return {'error': f'Ошибка чтения CSV: {e}'}, 400
-
 
     valid_mask = (
         df['№ вопроса'].notna() &
@@ -125,7 +124,6 @@ def process_csv():
         (df['Транскрибация ответа'] != '')
     )
     df_subset = df.loc[valid_mask, ['№ вопроса', 'Текст вопроса', 'Транскрибация ответа']].copy()
-
 
     predicted_scores = []
     for i, row in df_subset.iterrows():
@@ -138,7 +136,6 @@ def process_csv():
         predicted_scores.append(score_value)
         time.sleep(0.01)  # Пауза для соблюдения лимитов API
 
-
     df.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
     if 'Оценка экзаменатора' in df.columns:
         df['Оценка экзаменатора'] = pd.to_numeric(
@@ -150,7 +147,6 @@ def process_csv():
         df.to_csv(output_path, sep=';', encoding='utf-8-sig', index=False, quoting=1)
     except Exception as e:
         return {'error': f'Ошибка сохранения CSV: {e}'}, 500
-
 
     return send_file(
         output_path,
