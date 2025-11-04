@@ -5,21 +5,114 @@ import requests
 import json
 import time
 import os
-
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app)
 
-
 FOLDER_ID = "b1g6grqlei218ful6p26"
 MODEL = "yandexgpt-lite"
 
+# Получение API‑ключа из окружения
+API_KEY = os.environ.get("YANDEX_API_KEY")
+if not API_KEY:
+    raise ValueError("Переменная YANDEX_API_KEY не задана в окружении")
 
-IAM_TOKEN = os.environ.get('IAM_TOKEN')
-if not IAM_TOKEN:
-    raise ValueError("Переменная IAM_TOKEN не задана ни в config.json, ни в окружении")
+
+class APITokenManager:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.token = None
+        self.expiry = None  # Время истечения токена
+
+    def _get_fresh_token(self):
+        """Получает новый IAM‑токен через API по API‑ключу"""
+        url = "https://iam.cloud.yandex.ru/iam/v1/tokens"
+        payload = {
+            "api_key": self.api_key
+        }
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=10  # Таймаут 10 секунд
+            )
+            if response.status_code != 200:
+                raise Exception(
+                    f"Ошибка API ({response.status_code}): {response.text}"
+                )
+            data = response.json()
+            return data["iamToken"]
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Ошибка сети при получении токена: {e}")
+        except json.JSONDecodeError as e:
+            raise Exception(f"Ошибка разбора JSON: {e}")
+
+    def _is_token_valid(self, token):
+        """Проверяет токен через пробный лёгкий запрос к LLM API"""
+        url = "https://llm.api.cloud.yandex.net/foundationModels/v1/models"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "x-folder-id": FOLDER_ID,
+        }
+        try:
+            response = requests.get(url, headers=headers, timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+
+    def get_token(self):
+        """
+        Возвращает актуальный токен:
+        1. Если токен есть и не истёк — проверяем его работоспособность
+        2. Если токен истёк или невалиден — получаем новый
+        """
+        # 1. Проверка кэшированного токена
+        if self.token and self.expiry and datetime.now() < self.expiry:
+            if self._is_token_valid(self.token):
+                return self.token
+            else:
+                print("Кэшированный токен не прошёл проверку. Запрашиваем новый...")
+
+        # 2. Получение нового токена
+        try:
+            fresh_token = self._get_fresh_token()
+
+            # 3. Проверка нового токена
+            if self._is_token_valid(fresh_token):
+                self.token = fresh_token
+                # Устанавливаем TTL 1 час (3600 секунд)
+                self.expiry = datetime.now() + timedelta(seconds=3600)
+                print("Получен и проверен новый токен")
+                return self.token
+            else:
+                raise Exception("Новый токен не прошёл проверку работоспособности")
+        except Exception as e:
+            print(f"Ошибка получения токена: {e}")
+
+            # Аварийное использование старого токена (если есть)
+            if self.token:
+                print("Используем старый токен в аварийном режиме")
+                return self.token
+            raise
+
+
+# Создаём менеджер токенов
+token_manager = APITokenManager(API_KEY)
+
 
 def ask_yandex_gpt(prompt):
+    try:
+        IAM_TOKEN = token_manager.get_token()
+    except Exception as e:
+        print(f"Критическая ошибка получения IAM‑токена: {e}")
+        return ""
+
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
         "Authorization": f"Bearer {IAM_TOKEN}",
@@ -35,12 +128,17 @@ def ask_yandex_gpt(prompt):
         },
         "messages": [{"role": "user", "text": prompt}]
     }
-    response = requests.post(url, headers=headers, data=json.dumps(data))
+
     try:
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response.raise_for_status()
         return response.json()["result"]["alternatives"][0]["message"]["text"].strip()
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP ошибка: {e} | Ответ: {response.text}")
+        return ""
     except Exception as e:
-        print("Ошибка при обработке ответа:", e)
-        print("Ответ модели:", response.text)
+        print(f"Ошибка при обработке ответа: {e}")
+        print(f"Ответ модели: {response.text if response else 'Нет ответа'}")
         return ""
 
 def generate_prompt(row):
