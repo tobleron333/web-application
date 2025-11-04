@@ -1,59 +1,26 @@
+app.py
 from flask import Flask, request, send_file
 from flask_cors import CORS
 import pandas as pd
 import requests
+import json
 import time
 import os
-from urllib.parse import urlparse
+
 
 app = Flask(__name__)
 CORS(app)
 
+
 FOLDER_ID = "b1g6grqlei218ful6p26"
 MODEL = "yandexgpt-lite"
 
-IAM_TOKEN_URL = os.environ.get(
-    "IAM_TOKEN_URL",
-    "https://iam.api.cloud.yandex.net/iam/v1/token"
-)
 
-def validate_url(url):
-    try:
-        result = urlparse(url)
-        if all([result.scheme, result.netloc]):
-            return True
-        else:
-            raise ValueError(f"Некорректный URL: {url}")
-    except Exception as e:
-        print(f"Ошибка валидации URL: {e}")
-        return False
-
-if not validate_url(IAM_TOKEN_URL):
-    raise ValueError(f"Неверный URL для IAM: {IAM_TOKEN_URL}")
-
-API_KEY = os.environ.get("YANDEX_API_KEY")
-if not API_KEY:
-    raise ValueError("Переменная YANDEX_API_KEY не задана в окружении")
-
-def get_iam_token():
-    headers = {"Content-Type": "application/json"}
-    data = {"api_key": API_KEY}
-    try:
-        print(f"Запрос IAM-токена: {IAM_TOKEN_URL}")
-        response = requests.post(IAM_TOKEN_URL, json=data, headers=headers)  # Здесь исправлена передача URL
-        response.raise_for_status()
-        return response.json()["iamToken"]
-    except requests.exceptions.RequestException as e:
-        print(f"Ошибка получения IAM-токена: {e}")
-        raise
+IAM_TOKEN = os.environ.get('IAM_TOKEN')
+if not IAM_TOKEN:
+    raise ValueError("Переменная IAM_TOKEN не задана ни в config.json, ни в окружении")
 
 def ask_yandex_gpt(prompt):
-    try:
-        # Получаем свежий IAM-токен перед каждым запросом
-        IAM_TOKEN = get_iam_token()
-    except Exception as e:
-        return f"Ошибка аутентификации: {e}"
-
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
         "Authorization": f"Bearer {IAM_TOKEN}",
@@ -69,18 +36,13 @@ def ask_yandex_gpt(prompt):
         },
         "messages": [{"role": "user", "text": prompt}]
     }
+    response = requests.post(url, headers=headers, data=json.dumps(data))
     try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        result = response.json()
-        return result["result"]["alternatives"][0]["message"]["text"].strip()
-    except requests.exceptions.HTTPError as e:
-        print(f"HTTP ошибка: {e} | Ответ: {response.text}")
-        return f"Ошибка API: {response.status_code}"
+        return response.json()["result"]["alternatives"][0]["message"]["text"].strip()
     except Exception as e:
-        print(f"Неожиданная ошибка: {e}")
-        return "Ошибка обработки ответа модели"
-
+        print("Ошибка при обработке ответа:", e)
+        print("Ответ модели:", response.text)
+        return ""
 
 def generate_prompt(row):
     q_num = row["№ вопроса"]
@@ -112,10 +74,7 @@ def process_csv():
         return {'error': 'Файл не загружен'}, 400
 
     file = request.files['file']
-    try:
-        df = pd.read_csv(file, sep=';', dtype={'№ вопроса': 'Int64'})
-    except Exception as e:
-        return {'error': f'Ошибка чтения CSV: {e}'}, 400
+    df = pd.read_csv(file, sep=';', dtype={'№ вопроса': 'Int64'})
 
     valid_mask = (
         df['№ вопроса'].notna() &
@@ -134,25 +93,16 @@ def process_csv():
         except (ValueError, TypeError):
             score_value = 0
         predicted_scores.append(score_value)
-        time.sleep(0.01)  # Пауза для соблюдения лимитов API
+        time.sleep(0.01)
 
     df.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
     if 'Оценка экзаменатора' in df.columns:
-        df['Оценка экзаменатора'] = pd.to_numeric(
-            df['Оценка экзаменатора'], errors='coerce'
-        ).fillna(0).astype('Int64')
+        df['Оценка экзаменатора'] = pd.to_numeric(df['Оценка экзаменатора'], errors='coerce').fillna(0).astype('Int64')
 
     output_path = 'processed_file.csv'
-    try:
-        df.to_csv(output_path, sep=';', encoding='utf-8-sig', index=False, quoting=1)
-    except Exception as e:
-        return {'error': f'Ошибка сохранения CSV: {e}'}, 500
+    df.to_csv(output_path, sep=';', encoding='utf-8-sig', index=False, quoting=1)
 
-    return send_file(
-        output_path,
-        as_attachment=True,
-        download_name='обработанный_файл.csv'
-    )
+    return send_file(output_path, as_attachment=True, download_name='обработанный_файл.csv')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
