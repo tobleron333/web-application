@@ -6,10 +6,8 @@ import json
 import time
 import os
 
-
 app = Flask(__name__)
 CORS(app)
-
 
 FOLDER_ID = "b1g6grqlei218ful6p26"
 MODEL = "yandexgpt-lite"
@@ -18,11 +16,11 @@ try:
     with open('config.json', 'r', encoding='utf-8') as f:
         config = json.load(f)
     IAM_TOKEN = config['IAM_TOKEN']
-
 except FileNotFoundError:
     IAM_TOKEN = os.environ.get('IAM_TOKEN')
     if not IAM_TOKEN:
         raise ValueError("Переменная IAM_TOKEN не задана ни в config.json, ни в окружении")
+
 
 def ask_yandex_gpt(prompt):
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
@@ -48,6 +46,7 @@ def ask_yandex_gpt(prompt):
         print("Ответ модели:", response.text)
         return ""
 
+
 def generate_prompt(row):
     q_num = row["№ вопроса"]
     if q_num in [1, 3]:
@@ -72,34 +71,44 @@ def generate_prompt(row):
     """
     return prompt.strip()
 
+
 @app.route('/process-csv', methods=['POST'])
 def process_csv():
     if 'file' not in request.files:
         return {'error': 'Файл не загружен'}, 400
 
     file = request.files['file']
-    df = pd.read_csv(file, sep=';', dtype={'№ вопроса': 'Int64'})
 
-    valid_mask = (
-        df['№ вопроса'].notna() &
-        df['Текст вопроса'].notna() &
-        df['Транскрибация ответа'].notna() &
-        (df['Транскрибация ответа'] != '')
-    )
-    df_subset = df.loc[valid_mask, ['№ вопроса', 'Текст вопроса', 'Транскрибация ответа']].copy()
+    chunk_size = 500
+    results = []
 
-    predicted_scores = []
-    for i, row in df_subset.iterrows():
-        prompt = generate_prompt(row)
-        score = ask_yandex_gpt(prompt)
-        try:
-            score_value = int(score)
-        except (ValueError, TypeError):
-            score_value = 0
-        predicted_scores.append(score_value)
-        time.sleep(0.01)
+    for chunk in pd.read_csv(file, sep=';', chunksize=chunk_size, dtype={'№ вопроса': 'Int64'}):
+        valid_mask = (
+                chunk['№ вопроса'].notna() &
+                chunk['Текст вопроса'].notna() &
+                chunk['Транскрибация ответа'].notna() &
+                (chunk['Транскрибация ответа'] != '')
+        )
+        chunk_subset = chunk.loc[valid_mask, ['№ вопроса', 'Текст вопроса', 'Транскрибация ответа']].copy()
 
-    df.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
+        predicted_scores = []
+        for i, row in chunk_subset.iterrows():
+            prompt = generate_prompt(row)
+            score = ask_yandex_gpt(prompt)
+            try:
+                score_value = int(score)
+            except (ValueError, TypeError):
+                score_value = 0
+            predicted_scores.append(score_value)
+            time.sleep(0.01)
+
+        # Добавляем оценки в текущий чанк
+        chunk.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
+        results.append(chunk)
+
+    # Собираем все чанки в один DataFrame
+    df = pd.concat(results, ignore_index=True)
+
     if 'Оценка экзаменатора' in df.columns:
         df['Оценка экзаменатора'] = pd.to_numeric(df['Оценка экзаменатора'], errors='coerce').fillna(0).astype('Int64')
 
@@ -108,5 +117,6 @@ def process_csv():
 
     return send_file(output_path, as_attachment=True, download_name='обработанный_файл.csv')
 
-if __name__ == '__main__':
+
+if name == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
