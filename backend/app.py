@@ -118,5 +118,5 @@ def process_csv():
     return send_file(output_path, as_attachment=True, download_name='обработанный_файл.csv')
 
 
-if name == '__main__':
+if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
