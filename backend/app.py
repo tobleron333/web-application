@@ -1,25 +1,25 @@
-from flask import Flask, request, send_file
-from flask_cors import CORS
+from flask import Flask, request
+from flask_socketio import SocketIO, emit
 import pandas as pd
 import requests
 import json
-import time
 import os
+import time
+import logging
 
 app = Flask(__name__)
-CORS(app)
+app.config['SECRET_KEY'] = 'your-secret-key'  # Замените на случайную строку
+socketio = SocketIO(app, cors_allowed_origins=["https://web-application-f.onrender.com"])
+
 
 FOLDER_ID = "b1g6grqlei218ful6p26"
 MODEL = "yandexgpt-lite"
 
-try:
-    with open('config.json', 'r', encoding='utf-8') as f:
-        config = json.load(f)
-    IAM_TOKEN = config['IAM_TOKEN']
-except FileNotFoundError:
-    IAM_TOKEN = os.environ.get('IAM_TOKEN')
-    if not IAM_TOKEN:
-        raise ValueError("Переменная IAM_TOKEN не задана ни в config.json, ни в окружении")
+
+# Загрузка IAM_TOKEN из переменных окружения (на Render это удобнее)
+IAM_TOKEN = os.environ.get('IAM_TOKEN')
+if not IAM_TOKEN:
+    raise ValueError("IAM_TOKEN не задан в переменных окружения")
 
 
 def ask_yandex_gpt(prompt):
@@ -38,14 +38,12 @@ def ask_yandex_gpt(prompt):
         },
         "messages": [{"role": "user", "text": prompt}]
     }
-    response = requests.post(url, headers=headers, data=json.dumps(data))
     try:
+        response = requests.post(url, headers=headers, json=data)
         return response.json()["result"]["alternatives"][0]["message"]["text"].strip()
     except Exception as e:
-        print("Ошибка при обработке ответа:", e)
-        print("Ответ модели:", response.text)
+        logging.error(f"Ошибка Yandex GPT: {e}, ответ: {response.text}")
         return ""
-
 
 def generate_prompt(row):
     q_num = row["№ вопроса"]
@@ -59,6 +57,7 @@ def generate_prompt(row):
     question = str(row["Текст вопроса"])
     answer = str(row["Транскрибация ответа"])
 
+
     prompt = f"""
     Ты экзаменатор по русскому языку для иностранных граждан.
     Оцени ответ по критериям:
@@ -71,28 +70,41 @@ def generate_prompt(row):
     """
     return prompt.strip()
 
+@socketio.on('upload_file')
+def handle_file(data):
+    try:
+        # 1. Сохраняем файл
+        filename = data['filename']
+        file_data = bytes(data['file'])  # Преобразуем список в байты
+        
+        TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp")
+        os.makedirs(TEMP_DIR, exist_ok=True)
+        temp_path = os.path.join(TEMP_DIR, filename)
+        
+        with open(temp_path, 'wb') as f:
+            f.write(file_data)
 
-@app.route('/process-csv', methods=['POST'])
-def process_csv():
-    if 'file' not in request.files:
-        return {'error': 'Файл не загружен'}, 400
+        emit('progress', {'stage': 'saved', 'percent': 20})
 
-    file = request.files['file']
 
-    chunk_size = 500
-    results = []
+        # 2. Читаем CSV
+        df = pd.read_csv(temp_path, sep=';', dtype={'№ вопроса': 'Int64'})
+        emit('progress', {'stage': 'reading', 'percent': 40})
 
-    for chunk in pd.read_csv(file, sep=';', chunksize=chunk_size, dtype={'№ вопроса': 'Int64'}):
+
+        # 3. Обрабатываем строки
         valid_mask = (
-                chunk['№ вопроса'].notna() &
-                chunk['Текст вопроса'].notna() &
-                chunk['Транскрибация ответа'].notna() &
-                (chunk['Транскрибация ответа'] != '')
+            df['№ вопроса'].notna() &
+            df['Текст вопроса'].notna() &
+            df['Транскрибация ответа'].notna() &
+            (df['Транскрибация ответа'] != '')
         )
-        chunk_subset = chunk.loc[valid_mask, ['№ вопроса', 'Текст вопроса', 'Транскрибация ответа']].copy()
-
+        subset = df.loc[valid_mask, ['№ вопроса', 'Текст вопроса', 'Транскрибация ответа']].copy()
         predicted_scores = []
-        for i, row in chunk_subset.iterrows():
+        total_rows = len(subset)
+
+
+        for i, row in subset.iterrows():
             prompt = generate_prompt(row)
             score = ask_yandex_gpt(prompt)
             try:
@@ -100,23 +112,48 @@ def process_csv():
             except (ValueError, TypeError):
                 score_value = 0
             predicted_scores.append(score_value)
+
+
+            percent = 40 + int(60 * (i + 1) / total_rows)
+            emit('progress', {
+                'stage': 'processing',
+                'percent': percent,
+                'current': i + 1,
+                'total': total_rows
+            })
             time.sleep(0.01)
 
-        # Добавляем оценки в текущий чанк
-        chunk.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
-        results.append(chunk)
+        # 4. Добавляем оценки
+        df.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
+        if 'Оценка экзаменатора' in df.columns:
+            df['Оценка экзаменатора'] = pd.to_numeric(
+                df['Оценка экзаменатора'], errors='coerce'
+            ).fillna(0).astype('Int64')
 
-    # Собираем все чанки в один DataFrame
-    df = pd.concat(results, ignore_index=True)
+        emit('progress', {'stage': 'finalizing', 'percent': 90})
 
-    if 'Оценка экзаменатора' in df.columns:
-        df['Оценка экзаменатора'] = pd.to_numeric(df['Оценка экзаменатора'], errors='coerce').fillna(0).astype('Int64')
 
-    output_path = 'processed_file.csv'
-    df.to_csv(output_path, sep=';', encoding='utf-8-sig', index=False, quoting=1)
+        # 5. Сохраняем результат
+        output_path = os.path.join(TEMP_DIR, f!processed_{filename}")
+        df.to_csv(output_path, sep=';', encoding='utf-8-sig', index=False, quoting=1)
 
-    return send_file(output_path, as_attachment=True, download_name='обработанный_файл.csv')
+        with open(output_path, 'rb') as f:
+            file_bytes = f.read()
 
+        emit('file_ready', {
+            'filename': 'обработанный_файл.csv',
+            'data': list(file_bytes)  # Преобразуем в список для передачи через SocketIO
+        })
+
+        # Очищаем временные файлы
+        os.remove(temp_path)
+        os.remove(output_path)
+
+    except Exception as e:
+        logging.error(f!Ошибка обработки: {e}")
+        emit('error', {'message': str(e)})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host='0.0.0.0', port=port)
+
