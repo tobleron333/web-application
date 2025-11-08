@@ -1,17 +1,21 @@
-from flask import Flask, request
+from flask import Flask
 from flask_socketio import SocketIO, emit
 import pandas as pd
 import requests
 import os
 import logging
+from datetime import datetime
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-change-me'
+app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key')
 
-# Важно: укажите точный домен вашего приложения
+# SocketIO с CORS для Render
 socketio = SocketIO(
     app,
     cors_allowed_origins=["https://web-application-f.onrender.com"],
@@ -19,16 +23,16 @@ socketio = SocketIO(
     engineio_logger=True
 )
 
+# Конфигурация Yandex GPT
 FOLDER_ID = "b1g6grqlei218ful6p26"
 MODEL = "yandexgpt-lite"
-
-# Получение токена из переменных окружения
 IAM_TOKEN = os.environ.get('IAM_TOKEN')
+
 if not IAM_TOKEN:
     raise ValueError("IAM_TOKEN не задан в переменных окружения")
 
-
-def ask_yandex_gpt(prompt):
+def ask_yandex_gpt(prompt: str) -> str:
+    """Запрос к Yandex GPT с обработкой ошибок"""
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
         "Authorization": f"Bearer {IAM_TOKEN}",
@@ -40,66 +44,57 @@ def ask_yandex_gpt(prompt):
         "completionOptions": {
             "stream": False,
             "temperature": 0.1,
-            "maxTokens": 10000
+            "maxTokens": 1000
         },
         "messages": [{"role": "user", "text": prompt}]
     }
+
     try:
-        response = requests.post(url, headers=headers, json=data)
-        return response.json()["result"]["alternatives"][0]["message"]["text"].strip()
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        if response.status_code == 200:
+            return response.json()["result"]["alternatives"][0]["message"]["text"].strip()
+        else:
+            logging.error(f"GPT ошибка {response.status_code}: {response.text}")
+            return ""
     except Exception as e:
-        logging.error(f"Ошибка Yandex GPT: {e}, ответ: {response.text}")
+        logging.exception("Ошибка запроса к GPT")
         return ""
 
-def generate_prompt(row):
+def generate_prompt(row: pd.Series) -> str:
+    """Формирование промпта для оценки ответа"""
     q_num = row["№ вопроса"]
-    if q_num in [1, 3]:
-        min_score, max_score = 0, 1
-    elif q_num in [2, 4]:
-        min_score, max_score = 0, 2
-    else:
-        min_score, max_score = 0, 2
+    min_score, max_score = (0, 1) if q_num in [1, 3] else (0, 2)
 
-    question = str(row["Текст вопроса"])
-    answer = str(row["Транскрибация ответа"])
-
-    prompt = f"""
-    Ты экзаменатор по русскому языку для иностранных граждан.
-    Оцени ответ по критериям:
-    1. Мелкие ошибки и акцент не считаются.
-    2. Ответ должен быть по существу и решать коммуникативную задачу.
-    3. Предложения должны быть в основном полными.
-    Вопрос: {question}
-    Ответ экзаменуемого: {answer}
-    Поставь оценку от {min_score} до {max_score}. Ответ — только ЦЕЛОЕ число.
-    """
-    return prompt.strip()
+    return f"""Ты экзаменатор по русскому языку для иностранных граждан. Оцени ответ по критериям:
+1. Мелкие ошибки и акцент не считаются.
+2. Ответ должен быть по существу и решать коммуникативную задачу.
+3. Предложения должны быть в основном полными.
+Вопрос: {row['Текст вопроса']}
+Ответ экзаменуемого: {row['Транскрибация ответа']}
+Поставь оценку от {min_score} до {max_score}. Ответ — только ЦЕЛОЕ число."""
 
 @socketio.on('upload_file')
-def handle_file(data):
+def handle_upload(data):
+    """Обработка загруженного файла"""
     try:
-        # 1. Сохраняем файл
         filename = data['filename']
         file_data = bytes(data['file'])
+        temp_dir = os.path.join(os.path.dirname(__file__), "temp")
+        os.makedirs(temp_dir, exist_ok=True)
         
-        TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp")
-        os.makedirs(TEMP_DIR, exist_ok=True)
-        temp_path = os.path.join(TEMP_DIR, filename)
-        
+        # 1. Сохранение файла
+        temp_path = os.path.join(temp_dir, filename)
         with open(temp_path, 'wb') as f:
             f.write(file_data)
-
-        logging.info("Файл сохранён, отправляем прогресс 20%")
         emit('progress', {'percent': 20})
+        logging.info(f"[{filename}] Файл сохранён")
 
-
-        # 2. Читаем CSV
+        # 2. Чтение CSV
         df = pd.read_csv(temp_path, sep=';', dtype={'№ вопроса': 'Int64'})
-        logging.info("CSV прочитан, отправляем прогресс 40%")
         emit('progress', {'percent': 40})
+        logging.info(f"[{filename}] CSV прочитан")
 
-
-        # 3. Обрабатываем строки
+        # 3. Фильтрация данных
         valid_mask = (
             df['№ вопроса'].notna() &
             df['Текст вопроса'].notna() &
@@ -107,56 +102,60 @@ def handle_file(data):
             (df['Транскрибация ответа'] != '')
         )
         subset = df.loc[valid_mask, ['№ вопроса', 'Текст вопроса', 'Транскрибация ответа']].copy()
-        predicted_scores = []
         total_rows = len(subset)
+        
+        if total_rows == 0:
+            emit('error', {'message': 'Нет валидных строк для обработки'})
+            return
 
-
+        predicted_scores = []
+        
+        # 4. Обработка строк с прогрессом
         for i, row in subset.iterrows():
             prompt = generate_prompt(row)
-            score = ask_yandex_gpt(prompt)
+            score_text = ask_yandex_gpt(prompt)
+            
             try:
-                score_value = int(score)
+                score = int(score_text)
+                if score < 0 or score > 2: score = 0
             except (ValueError, TypeError):
-                score_value = 0
-            predicted_scores.append(score_value)
-
-            # Отправляем прогресс для каждой обработанной строки
-            current_percent = 40 + int(60 * (i + 1) / total_rows)
-            logging.info(f"Обработана строка {i+1}/{total_rows}, прогресс: {current_percent}%")
-            emit('progress', {'percent': current_percent})
-
-
-        # 4. Добавляем оценки
+                score = 0
+                
+            predicted_scores.append(score)
+            
+            # Плавный прогресс: 40% → 90%
+            percent = 40 + int((i + 1) / total_rows * 50)
+            emit('progress', {'percent': percent})
+            
+        # 5. Добавление оценок в DataFrame
         df.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
-        if 'Оценка экзаменатора' in df.columns:
-            df['Оценка экзаменатора'] = pd.to_numeric(
-                df['Оценка экзаменатора'], errors='coerce'
-            ).fillna(0).astype('Int64')
-
-        logging.info("Обработка завершена, отправляем прогресс 90%")
+        df['Оценка экзаменатора'] = pd.to_numeric(
+            df['Оценка экзаменатора'], errors='coerce'
+        ).fillna(0).astype('Int64')
+        
         emit('progress', {'percent': 90})
+        logging.info(f"[{filename}] Обработка завершена")
 
-        # 5. Сохраняем результат
-        output_path = os.path.join(TEMP_DIR, f!processed_{filename}")
+        # 6. Сохранение результата
+        output_path = os.path.join(temp_dir, f!processed_{filename}")
         df.to_csv(output_path, sep=';', encoding='utf-8-sig', index=False, quoting=1)
 
         with open(output_path, 'rb') as f:
             file_bytes = f.read()
 
-        logging.info("Файл готов, отправляем клиенту")
         emit('file_ready', {
-            'filename': 'обработанный_файл.csv',
+            'filename': f!обработанный_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             'data': list(file_bytes)
         })
+        logging.info(f"[{filename}] Файл готов для скачивания")
 
-        # Очищаем временные файлы
+        # Очистка
         os.remove(temp_path)
         os.remove(output_path)
 
     except Exception as e:
-        logging.error(f!Ошибка обработки: {e}")
+        logging.exception("Ошибка обработки файла")
         emit('error', {'message': str(e)})
-
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
