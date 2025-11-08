@@ -1,38 +1,28 @@
-from flask import Flask
-from flask_socketio import SocketIO, emit
+from flask import Flask, request, send_file, jsonify
+from flask_socketio import SocketIO
 import pandas as pd
 import requests
+import json
 import os
-import logging
-from datetime import datetime
-
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
-)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key')
+app.config['SECRET_KEY'] = 'your-secret-key'
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# SocketIO с CORS для Render
-socketio = SocketIO(
-    app,
-    cors_allowed_origins=["https://web-application-f.onrender.com"],
-    logger=True,
-    engineio_logger=True
-)
-
-# Конфигурация Yandex GPT
 FOLDER_ID = "b1g6grqlei218ful6p26"
 MODEL = "yandexgpt-lite"
-IAM_TOKEN = os.environ.get('IAM_TOKEN')
 
-if not IAM_TOKEN:
-    raise ValueError("IAM_TOKEN не задан в переменных окружения")
+# Загрузка IAM_TOKEN
+try:
+    with open('config.json', 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    IAM_TOKEN = config['IAM_TOKEN']
+except FileNotFoundError:
+    IAM_TOKEN = os.environ.get('IAM_TOKEN')
+    if not IAM_TOKEN:
+        raise ValueError("IAM_TOKEN не задан в config.json или окружении")
 
-def ask_yandex_gpt(prompt: str) -> str:
-    """Запрос к Yandex GPT с обработкой ошибок"""
+def ask_yandex_gpt(prompt):
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
         "Authorization": f"Bearer {IAM_TOKEN}",
@@ -44,57 +34,61 @@ def ask_yandex_gpt(prompt: str) -> str:
         "completionOptions": {
             "stream": False,
             "temperature": 0.1,
-            "maxTokens": 1000
+            "maxTokens": 10000
         },
         "messages": [{"role": "user", "text": prompt}]
     }
-
+    response = requests.post(url, headers=headers, json=data)
     try:
-        response = requests.post(url, headers=headers, json=data, timeout=30)
-        if response.status_code == 200:
-            return response.json()["result"]["alternatives"][0]["message"]["text"].strip()
-        else:
-            logging.error(f"GPT ошибка {response.status_code}: {response.text}")
-            return ""
+        return response.json()["result"]["alternatives"][0]["message"]["text"].strip()
     except Exception as e:
-        logging.exception("Ошибка запроса к GPT")
+        print("Ошибка GPT:", e)
+        print("Ответ:", response.text)
         return ""
 
-def generate_prompt(row: pd.Series) -> str:
-    """Формирование промпта для оценки ответа"""
+def generate_prompt(row):
     q_num = row["№ вопроса"]
-    min_score, max_score = (0, 1) if q_num in [1, 3] else (0, 2)
+    if q_num in [1, 3]: min_score, max_score = 0, 1
+    elif q_num in [2, 4]: min_score, max_score = 0, 2
+    else: min_score, max_score = 0, 2
 
-    return f"""Ты экзаменатор по русскому языку для иностранных граждан. Оцени ответ по критериям:
-1. Мелкие ошибки и акцент не считаются.
-2. Ответ должен быть по существу и решать коммуникативную задачу.
-3. Предложения должны быть в основном полными.
-Вопрос: {row['Текст вопроса']}
-Ответ экзаменуемого: {row['Транскрибация ответа']}
-Поставь оценку от {min_score} до {max_score}. Ответ — только ЦЕЛОЕ число."""
+    question = str(row["Текст вопроса"])
+    answer = str(row["Транскрибация ответа"])
 
-@socketio.on('upload_file')
-def handle_upload(data):
-    """Обработка загруженного файла"""
+    return f"""
+    Ты экзаменатор по русскому языку для иностранных граждан.
+    Оцени ответ по критериям:
+    1. Мелкие ошибки и акцент не считаются.
+    2. Ответ должен быть по существу и решать коммуникативную задачу.
+    3. Предложения должны быть в основном полными.
+    Вопрос: {question}
+    Ответ экзаменуемого: {answer}
+    Поставь оценку от {min_score} до {max_score}. Ответ — только ЦЕЛОЕ число.
+    """.strip()
+
+# Маршрут для загрузки файла
+@app.route('/upload-csv', methods=['POST'])
+def upload_csv():
+    if 'file' not in request.files:
+        return jsonify({'error': 'Файл не загружен'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'Файл не выбран'}), 400
+
+    # Сохраняем временно
+    temp_path = 'uploaded_temp.csv'
+    file.save(temp_path)
+
+    return jsonify({'status': 'uploaded', 'path': temp_path}), 200
+
+# WebSocket для обработки
+@socketio.on('process_csv')
+def handle_process_csv(data):
     try:
-        filename = data['filename']
-        file_data = bytes(data['file'])
-        temp_dir = os.path.join(os.path.dirname(__file__), "temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # 1. Сохранение файла
-        temp_path = os.path.join(temp_dir, filename)
-        with open(temp_path, 'wb') as f:
-            f.write(file_data)
-        emit('progress', {'percent': 20})
-        logging.info(f"[{filename}] Файл сохранён")
+        # Читаем сохранённый файл
+        df = pd.read_csv('uploaded_temp.csv', sep=';', dtype={'№ вопроса': 'Int64'})
 
-        # 2. Чтение CSV
-        df = pd.read_csv(temp_path, sep=';', dtype={'№ вопроса': 'Int64'})
-        emit('progress', {'percent': 40})
-        logging.info(f"[{filename}] CSV прочитан")
-
-        # 3. Фильтрация данных
         valid_mask = (
             df['№ вопроса'].notna() &
             df['Текст вопроса'].notna() &
@@ -102,61 +96,49 @@ def handle_upload(data):
             (df['Транскрибация ответа'] != '')
         )
         subset = df.loc[valid_mask, ['№ вопроса', 'Текст вопроса', 'Транскрибация ответа']].copy()
-        total_rows = len(subset)
-        
-        if total_rows == 0:
-            emit('error', {'message': 'Нет валидных строк для обработки'})
-            return
 
         predicted_scores = []
-        
-        # 4. Обработка строк с прогрессом
+        total_rows = len(subset)
+
         for i, row in subset.iterrows():
             prompt = generate_prompt(row)
-            score_text = ask_yandex_gpt(prompt)
-            
+            score = ask_yandex_gpt(prompt)
             try:
-                score = int(score_text)
-                if score < 0 or score > 2: score = 0
+                score_value = int(score)
             except (ValueError, TypeError):
-                score = 0
-                
-            predicted_scores.append(score)
-            
-            # Плавный прогресс: 40% → 90%
-            percent = 40 + int((i + 1) / total_rows * 50)
-            emit('progress', {'percent': percent})
-            
-        # 5. Добавление оценок в DataFrame
-        df.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
-        df['Оценка экзаменатора'] = pd.to_numeric(
-            df['Оценка экзаменатора'], errors='coerce'
-        ).fillna(0).astype('Int64')
-        
-        emit('progress', {'percent': 90})
-        logging.info(f"[{filename}] Обработка завершена")
+                score_value = 0
+            predicted_scores.append(score_value)
 
-        # 6. Сохранение результата
-        output_path = os.path.join(temp_dir, f!processed_{filename}")
+            # Отправляем прогресс
+            progress = int((i + 1) / total_rows * 100)
+            socketio.emit('progress', {'progress': progress})
+
+        # Добавляем оценки
+        df.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
+        if 'Оценка экзаменатора' in df.columns:
+            df['Оценка экзаменатора'] = pd.to_numeric(
+                df['Оценка экзаменатора'], errors='coerce'
+            ).fillna(0).astype('Int64')
+
+        # Сохраняем результат
+        output_path = 'processed_file.csv'
         df.to_csv(output_path, sep=';', encoding='utf-8-sig', index=False, quoting=1)
 
+        # Отправляем файл клиенту
         with open(output_path, 'rb') as f:
-            file_bytes = f.read()
-
-        emit('file_ready', {
-            'filename': f!обработанный_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            'data': list(file_bytes)
+            file_data = f.read()
+        socketio.emit('file_ready', {
+            'filename': 'обработанный_файл.csv',
+            'data': file_data
         })
-        logging.info(f"[{filename}] Файл готов для скачивания")
-
-        # Очистка
-        os.remove(temp_path)
-        os.remove(output_path)
 
     except Exception as e:
-        logging.exception("Ошибка обработки файла")
-        emit('error', {'message': str(e)})
+        socketio.emit('error', {'message': str(e)})
+        print("Ошибка обработки:", e)
+
+@app.route('/')
+def index():
+    return "Server is running", 200
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host='0.0.0.0', port=port)
+    socketio.run(app, host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
