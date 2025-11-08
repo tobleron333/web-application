@@ -2,21 +2,27 @@ from flask import Flask, request
 from flask_socketio import SocketIO, emit
 import pandas as pd
 import requests
-import json
 import os
-import time
 import logging
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key'  # Замените на случайную строку
-socketio = SocketIO(app, cors_allowed_origins=["https://web-application-f.onrender.com"])
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
 
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key-change-me'
+
+# Важно: укажите точный домен вашего приложения
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=["https://web-application-f.onrender.com"],
+    logger=True,
+    engineio_logger=True
+)
 
 FOLDER_ID = "b1g6grqlei218ful6p26"
 MODEL = "yandexgpt-lite"
 
-
-# Загрузка IAM_TOKEN из переменных окружения (на Render это удобнее)
+# Получение токена из переменных окружения
 IAM_TOKEN = os.environ.get('IAM_TOKEN')
 if not IAM_TOKEN:
     raise ValueError("IAM_TOKEN не задан в переменных окружения")
@@ -57,7 +63,6 @@ def generate_prompt(row):
     question = str(row["Текст вопроса"])
     answer = str(row["Транскрибация ответа"])
 
-
     prompt = f"""
     Ты экзаменатор по русскому языку для иностранных граждан.
     Оцени ответ по критериям:
@@ -75,7 +80,7 @@ def handle_file(data):
     try:
         # 1. Сохраняем файл
         filename = data['filename']
-        file_data = bytes(data['file'])  # Преобразуем список в байты
+        file_data = bytes(data['file'])
         
         TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp")
         os.makedirs(TEMP_DIR, exist_ok=True)
@@ -84,12 +89,14 @@ def handle_file(data):
         with open(temp_path, 'wb') as f:
             f.write(file_data)
 
-        emit('progress', {'stage': 'saved', 'percent': 20})
+        logging.info("Файл сохранён, отправляем прогресс 20%")
+        emit('progress', {'percent': 20})
 
 
         # 2. Читаем CSV
         df = pd.read_csv(temp_path, sep=';', dtype={'№ вопроса': 'Int64'})
-        emit('progress', {'stage': 'reading', 'percent': 40})
+        logging.info("CSV прочитан, отправляем прогресс 40%")
+        emit('progress', {'percent': 40})
 
 
         # 3. Обрабатываем строки
@@ -113,15 +120,11 @@ def handle_file(data):
                 score_value = 0
             predicted_scores.append(score_value)
 
+            # Отправляем прогресс для каждой обработанной строки
+            current_percent = 40 + int(60 * (i + 1) / total_rows)
+            logging.info(f"Обработана строка {i+1}/{total_rows}, прогресс: {current_percent}%")
+            emit('progress', {'percent': current_percent})
 
-            percent = 40 + int(60 * (i + 1) / total_rows)
-            emit('progress', {
-                'stage': 'processing',
-                'percent': percent,
-                'current': i + 1,
-                'total': total_rows
-            })
-            time.sleep(0.01)
 
         # 4. Добавляем оценки
         df.loc[valid_mask, 'Оценка экзаменатора'] = predicted_scores
@@ -130,8 +133,8 @@ def handle_file(data):
                 df['Оценка экзаменатора'], errors='coerce'
             ).fillna(0).astype('Int64')
 
-        emit('progress', {'stage': 'finalizing', 'percent': 90})
-
+        logging.info("Обработка завершена, отправляем прогресс 90%")
+        emit('progress', {'percent': 90})
 
         # 5. Сохраняем результат
         output_path = os.path.join(TEMP_DIR, f!processed_{filename}")
@@ -140,9 +143,10 @@ def handle_file(data):
         with open(output_path, 'rb') as f:
             file_bytes = f.read()
 
+        logging.info("Файл готов, отправляем клиенту")
         emit('file_ready', {
             'filename': 'обработанный_файл.csv',
-            'data': list(file_bytes)  # Преобразуем в список для передачи через SocketIO
+            'data': list(file_bytes)
         })
 
         # Очищаем временные файлы
@@ -153,7 +157,7 @@ def handle_file(data):
         logging.error(f!Ошибка обработки: {e}")
         emit('error', {'message': str(e)})
 
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host='0.0.0.0', port=port)
-
