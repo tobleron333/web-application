@@ -1,30 +1,17 @@
 import React, { useState } from "react";
 
-
 function App() {
     const [file, setFile] = useState(null);
-    const [isUploading, setIsUploading] = useState(false); // Загрузка файла
-    const [isProcessing, setIsProcessing] = useState(false); // Обработка на сервере
+    const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState("");
-    const [uploadProgress, setUploadProgress] = useState(0); // Прогресс загрузки
-
+    const [uploadProgress, setUploadProgress] = useState(0); // Реальный прогресс загрузки
 
     const handleFileChange = (event) => {
         const selectedFile = event.target.files[0];
         if (selectedFile && selectedFile.type === "text/csv") {
             setFile(selectedFile);
             setError("");
-            // Имитируем загрузку файла (в реальном проекте это будет XHR/fetch с onprogress)
-            setIsUploading(true);
-            let progress = 0;
-            const interval = setInterval(() => {
-                progress += 10;
-                setUploadProgress(progress);
-                if (progress >= 100) {
-                    clearInterval(interval);
-                    setIsUploading(false);
-                }
-            }, 100);
+            setUploadProgress(0); // Сброс прогресса
         } else {
             setError("Выберите файл формата CSV");
             setFile(null);
@@ -44,10 +31,23 @@ function App() {
         formData.append("file", file);
 
         try {
-            const response = await fetch("https://web-application-xihu.onrender.com/process-csv", {
-                method: "POST",
-                body: formData,
-            });
+            // Создаём запрос с отслеживанием прогресса
+            const response = await fetch(
+                "https://web-application-xihu.onrender.com/process-csv",
+                {
+                    method: "POST",
+                    body: formData,
+                    // Отслеживаем прогресс загрузки
+                    onprogress: (progressEvent) => {
+                        if (progressEvent.lengthComputable) {
+                            const percentCompleted = Math.round(
+                                (progressEvent.loaded * 100) / progressEvent.total
+                            );
+                            setUploadProgress(percentCompleted);
+                        }
+                    }
+                }
+            );
 
             if (response.ok) {
                 const blob = await response.blob();
@@ -68,38 +68,45 @@ function App() {
         }
 
         setIsProcessing(false);
+        setUploadProgress(0); // Сброс прогресса после завершения
     };
 
     // Спиннер для обработки
     const ProcessingSpinner = () => (
-        <div style={{
-            display: "inline-block",
-            width: "20px",
-            height: "20px",
-            border: "3px solid #fff",
-            borderTopColor: "#007bff",
-            borderRadius: "50%",
-            animation: "spin 1s linear infinite",
-            marginRight: "8px",
-            verticalAlign: "middle"
-        }} />
+        <div
+            style={{
+                display: "inline-block",
+                width: "20px",
+                height: "20px",
+                border: "3px solid #fff",
+                borderTopColor: "#007bff",
+                borderRadius: "50%",
+                animation: "spin 1s linear infinite",
+                marginRight: "8px",
+                verticalAlign: "middle"
+            }}
+        />
     );
 
-    // Полоса прогресса для загрузки файла
-    const UploadProgress = () => (
-        <div style={{
-            marginTop: "10px",
-            width: "100%",
-            backgroundColor: "#e0e0e0",
-            borderRadius: "4px",
-            overflow: "hidden"
-        }}>
-            <div style={{
-                height: "10px",
-                width: `${uploadProgress}%`,
-                backgroundColor: "#4caf50",
-                transition: "width 0.3s ease-out"
-            }} />
+    // Полоса прогресса загрузки
+    const UploadProgressBar = () => (
+        <div
+            style={{
+                marginTop: "10px",
+                width: "100%",
+                backgroundColor: "#e0e0e0",
+                borderRadius: "4px",
+                overflow: "hidden"
+            }}
+        >
+            <div
+                style={{
+                    height: "10px",
+                    width: `${uploadProgress}%`,
+                    backgroundColor: "#4caf50",
+                    transition: "width 0.3s ease-out"
+                }}
+            />
         </div>
     );
 
@@ -117,20 +124,20 @@ function App() {
                 type="file"
                 accept=".csv"
                 onChange={handleFileChange}
-                disabled={isUploading || isProcessing}
+                disabled={isProcessing}
             />
 
-            {/* Отображаем прогресс загрузки, если идёт загрузка */}
-            {isUploading && (
+            {/* Отображаем прогресс, если идёт загрузка */}
+            {isProcessing && uploadProgress > 0 && (
                 <div style={{ marginTop: "10px" }}>
                     <p>Загрузка файла: {uploadProgress}%</p>
-                    <UploadProgress />
+                    <UploadProgressBar />
                 </div>
             )}
 
             <button
                 onClick={handleProcess}
-                disabled={!file || isUploading || isProcessing}
+                disabled={!file || isProcessing}
                 style={{
                     marginTop: "10px",
                     padding: "8px 16px",
