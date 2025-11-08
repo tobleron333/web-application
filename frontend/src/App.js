@@ -43,15 +43,17 @@ function App() {
 
     const xhr = new XMLHttpRequest();
 
-    xhr.upload.onprogress = (event) => {
+    xhr.upload.addEventListener("progress", (event) => {
       if (event.lengthComputable) {
         const percentComplete = Math.round((event.loaded * 100) / event.total);
+        console.log("Прогресс загрузки:", percentComplete);
         setUploadProgress(percentComplete);
       }
-    };
+    });
 
     xhr.onload = () => {
       if (xhr.status === 200) {
+        console.log("Файл загружен на сервер");
         setUploadProgress(100);
         startProcessing();
       } else {
@@ -59,11 +61,17 @@ function App() {
       }
     };
 
-    xhr.onerror = () => {
-      handleError(new Error("Ошибка сети при загрузке файла"));
+    xhr.onerror = (err) => {
+      console.error("Ошибка XHR:", err);
+      handleError(new Error("Ошибка сети или сервера"));
+    };
+
+    xhr.ontimeout = () => {
+      handleError(new Error("Превышено время ожидания"));
     };
 
     xhr.open("POST", "https://web-application-f.onrender.com/upload-csv");
+    xhr.timeout = 30000;
     xhr.send(formData);
   };
 
@@ -107,6 +115,7 @@ function App() {
   };
 
   const handleError = (err) => {
+    console.error("Ошибка:", err);
     setError(`Ошибка: ${err.message || err}`);
     cleanup();
   };
@@ -251,5 +260,4 @@ function App() {
   );
 }
 
-export default App;
-
+export default App
