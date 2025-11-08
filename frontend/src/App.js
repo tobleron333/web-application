@@ -1,21 +1,23 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { io } from "socket.io-client";
-
-// Подключение к вашему серверу
-const socket = io("https://web-application-f.onrender.com", {
-  transports: ["websocket"],
-  reconnection: true,
-  reconnectionAttempts: 5,
-});
 
 function App() {
   const [file, setFile] = useState(null);
-  const [isUploading, setIsUploading] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [isUploading, setIsUploading] = useState(false);  // Загрузка на сервер
+  const [isProcessing, setIsProcessing] = useState(false); // Обработка нейросетью
+  const [progress, setProgress] = useState(0);           // Прогресс обработки
   const [error, setError] = useState("");
-  const [resultFile, setResultFile] = useState(null);
+  const socketRef = useRef(null);
 
-  // Обработчик выбора файла
+  // Отключаем WebSocket при размонтировании
+  useEffect(() => {
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, []);
+
   const handleFileChange = (event) => {
     const selectedFile = event.target.files[0];
     if (selectedFile && selectedFile.type === "text/csv") {
@@ -27,140 +29,197 @@ function App() {
     }
   };
 
-  // Отправка файла на сервер
-  const handleUpload = () => {
+  const handleProcess = async () => {
     if (!file) {
       setError("Сначала загрузите файл CSV");
       return;
     }
 
+    // 1. Начинаем загрузку на сервер
     setIsUploading(true);
     setProgress(0);
     setError("");
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const arrayBuffer = reader.result;
-      socket.connect();
+    try {
+      // Отправляем файл на /upload-csv
+      const formData = new FormData();
+      formData.append("file", file);
 
-      socket.emit("upload_file", {
-        file: Array.from(new Uint8Array(arrayBuffer)),
-        filename: file.name,
+      const uploadResponse = await fetch(
+        "https://web-application-f.onrender.com/upload-csv",
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      if (!uploadResponse.ok) {
+        throw new Error("Ошибка загрузки файла на сервер");
+      }
+
+      // 2. Переходим к обработке через WebSocket
+      setIsUploading(false);
+      setIsProcessing(true);
+
+      socketRef.current = io("https://web-application-f.onrender.com", {
+        transports: ["websocket"],
+        reconnection: true,
+        reconnectionAttempts: 3,
+        timeout: 30000,
       });
-    };
-    reader.readAsArrayBuffer(file);
+
+      // Обработчики событий WebSocket
+      socketRef.current.on("connect", () => {
+        console.log("WebSocket подключён");
+      });
+
+      socketRef.current.on("progress", (data) => {
+        setProgress(data.progress || 0);
+      });
+
+      socketRef.current.on("file_ready", (data) => {
+        try {
+          const blob = new Blob([data.data], { type: "text/csv;charset=utf-8" });
+          const url = window.URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = data.filename || "обработанный_файл.csv";
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          window.URL.revokeObjectURL(url);
+
+          alert("Файл успешно обработан и загружен!");
+        } catch (err) {
+          setError(`Ошибка при сохранении файла: ${err.message}`);
+        } finally {
+          cleanup();
+        }
+      });
+
+      socketRef.current.on("error", (err) => {
+        setError(`Ошибка обработки: ${err.message || err}`);
+        cleanup();
+      });
+
+      socketRef.current.on("disconnect", () => {
+        console.log("WebSocket отключён");
+      });
+
+      // Запускаем обработку на сервере
+      socketRef.current.emit("process_csv", {});
+
+    } catch (err) {
+      setError(`Ошибка: ${err.message}`);
+      setIsUploading(false);
+    }
   };
 
-  // Обработка событий от сервера
-  useEffect(() => {
-    // Обновление прогресса
-    socket.on("progress", (data) => {
-      console.log("Получен прогресс:", data.percent);
-      setProgress(data.percent || 0);
-    });
+  // Очищаем состояния и соединение
+  const cleanup = () => {
+    setIsProcessing(false);
+    setProgress(0);
+    setFile(null);
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+    }
+  };
 
-    // Ошибка на сервере
-    socket.on("error", (data) => {
-      console.error("Ошибка сервера:", data.message);
-      setError(data.message || "Произошла ошибка на сервере");
-      setIsUploading(false);
-      setProgress(0);
-    });
-
-    // Готовый файл
-    socket.on("file_ready", (data) => {
-      try {
-        // Создаём Blob из байтов
-        const blob = new Blob([new Uint8Array(data.data)], {
-          type: "text/csv;charset=utf-8",
-        });
-
-        // Скачиваем файл
-        const url = window.URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = data.filename;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(url);
-
-        setResultFile(data.filename);
-        setProgress(100);
-        setIsUploading(false);
-      } catch (err) {
-        setError("Не удалось сохранить файл: " + err.message);
-        setIsUploading(false);
-      }
-    });
-
-    // Отключаемся при размонтировании
-    return () => {
-      socket.disconnect();
-    };
-  }, []);
-
-  // Компонент спиннера
-  const ProcessingSpinner = () => (
-    <div
-      style={{
-        display: "inline-block",
-        width: "20px",
-        height: "20px",
-        border: "3px solid #fff",
-        borderTopColor: "#007bff",
-        borderRadius: "50%",
-        animation: "spin 1s linear infinite",
-        marginRight: "8px",
-        verticalAlign: "middle",
-      }}
-    />
+  // Анимация загрузки на сервер (вращающийся круг)
+  const UploadAnimation = () => (
+    <div style={{ textAlign: "center", margin: "20px 0" }}>
+      <svg
+        width="50"
+        height="50"
+        viewBox="0 0 50 50"
+        style={{
+          animation: "spin 1s linear infinite",
+          margin: "0 auto",
+        }}
+      >
+        <circle
+          cx="25"
+          cy="25"
+          r="20"
+          fill="none"
+          stroke="#007bff"
+          strokeWidth="5"
+          strokeDasharray="1,70"
+          strokeLinecap="round"
+        />
+      </svg>
+      <p style={{ marginTop: "10px", color: "#666", fontSize: "14px" }}>
+        Загружается на сервер...
+      </p>
+    </div>
   );
 
-  // Полоса прогресса
+  // Прогресс‑бар обработки
   const ProgressBar = () => (
     <div
       style={{
-        marginTop: "15px",
         width: "100%",
-        backgroundColor: "#e0e0e0",
-        borderRadius: "8px",
+        height: "20px",
+        border: "1px solid #ddd",
+        borderRadius: "10px",
         overflow: "hidden",
-        boxShadow: "0 2px 4px rgba(0,0,0,0.1)",
+        marginTop: "15px",
       }}
     >
       <div
         style={{
-          height: "24px",
           width: `${progress}%`,
-          backgroundColor: progress >= 100 ? "#4caf50" : "#1976d2",
-          transition: "width 0.3s ease-out",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
+          height: "100%",
+          backgroundColor: "#4CAF50",
+          transition: "width 0.3s ease",
+        }}
+      />
+      <span
+        style={{
+          position: "relative",
+          top: "-20px",
+          left: "50%",
+          transform: "translateX(-50%)",
           color: "white",
-          fontSize: "14px",
+          fontSize: "12px",
+          fontWeight: "bold",
         }}
       >
         {progress}%
-      </div>
+      </span>
     </div>
   );
 
   return (
-    <div style={{ padding: "30px", fontFamily: "Arial, sans-serif", maxWidth: "600px", margin: "0 auto" }}>
-      <h1 style={{ textAlign: "center" }}>Обработка CSV-файла</h1>
+    <div
+      style={{
+        padding: "20px",
+        fontFamily: "Arial, sans-serif",
+        maxWidth: "600px",
+        margin: "0 auto",
+      }}
+    >
+      {/* Стили анимации вращения */}
+      <style>
+        {`
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+        `}
+      </style>
+
+      <h1>Обработка CSV‑файла</h1>
 
       {error && (
         <div
           style={{
-            backgroundColor: "#ffecec",
-            color: "#d32f2f",
-            padding: "15px",
-            borderRadius: "8px",
-            marginBottom: "20px",
-            border: "1px solid #ffcdd2",
-            textAlign: "left",
+            color: "red",
+            backgroundColor: "#ffeaea",
+            padding: "10px",
+            borderRadius: "5px",
+            marginBottom: "15px",
+            border: "1px solid #ffcccc",
           }}
         >
           {error}
@@ -171,74 +230,62 @@ function App() {
         type="file"
         accept=".csv"
         onChange={handleFileChange}
-        disabled={isUploading}
+        disabled={isUploading || isProcessing}
         style={{
+          display: "block",
+          marginBottom: "15px",
+          padding: "8px",
+          border: "1px solid #ccc",
+          borderRadius: "4px",
           width: "100%",
-          padding: "12px",
-          border: "2px dashed #1976d2",
-          borderRadius: "8px",
-          marginBottom: "20px",
-          cursor: isUploading ? "not-allowed" : "pointer",
           boxSizing: "border-box",
         }}
       />
 
-      {isUploading && (
-        <div style={{ marginBottom: "20px" }}>
-          <ProgressBar />
-        </div>
-      )}
-
       <button
-        onClick={handleUpload}
-        disabled={!file || isUploading}
+        onClick={handleProcess}
+        disabled={!file || isUploading || isProcessing}
         style={{
-          width: "100%",
-          padding: "15px",
-          backgroundColor: isUploading ? "#bdbdbd" : "#1976d2",
+          padding: "10px 20px",
+          backgroundColor: isUploading || isProcessing ? "#cccccc" : "#007bff",
           color: "white",
           border: "none",
-          borderRadius: "8px",
-          cursor: isUploading ? "not-allowed" : "pointer",
+          borderRadius: "5px",
+          cursor: (!file || isUploading || isProcessing) ? "not-allowed" : "pointer",
+          width: "100%",
           fontSize: "16px",
-          fontWeight: "bold",
-          marginTop: "10px",
         }}
       >
-        {isUploading ? (
-          <>
-            <ProcessingSpinner />
-            Идет обработка... ({progress}%)
-          </>
-        ) : (
-          "Загрузить и обработать"
-        )}
+        {isUploading
+          ? "Загружается..."
+          : isProcessing
+          ? "Обрабатывается..."
+          : "Обработать CSV"}
       </button>
 
-      {resultFile && (
-        <p
-          style={{
-            marginTop: "25px",
-            textAlign: "center",
-            color: "#2e7d32",
-            fontSize: "18px",
-            fontWeight: "500",
-          }}
-        >
-          Файл "{resultFile}" успешно обработан и скачан!
-        </p>
-      )}
+      {isUploading && <UploadAnimation />}
 
-      <style>{`
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-      `}</style>
+      {isProcessing && (
+        <div style={{ marginTop: "20px" }}>
+          <p style={{ marginBottom: "5px", color: "#555" }}>
+            Прогресс обработки:
+          </p>
+          <ProgressBar />
+          <p
+            style={{
+              textAlign: "center",
+              marginTop: "10px",
+              color: "#777",
+              fontSize: "14px",
+            }}
+          >
+            Пожалуйста, не закрывайте страницу
+          </p>
+        </div>
+      )}
     </div>
   );
 }
 
 export default App;
-
 
