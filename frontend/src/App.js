@@ -56,6 +56,21 @@ function App() {
         setIsProcessing(false);
     };
 
+    // Компонент спиннера (анимация загрузки)
+    const Loader = () => (
+        <div style={{
+            display: "inline-block",
+            width: "20px",
+            height: "20px",
+            border: "3px solid #fff",
+            borderTopColor: "#007bff",
+            borderRadius: "50%",
+            animation: "spin 1s linear infinite",
+            marginRight: "8px",
+            verticalAlign: "middle"
+        }} />
+    );
+
     return (
         <div style={{ padding: "20px", fontFamily: "Arial, sans-serif" }}>
             <h1>CSV File Upload & Processing</h1>
@@ -83,10 +98,28 @@ function App() {
                     color: "white",
                     border: "none",
                     cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center"
                 }}
             >
-                {isProcessing ? "Обработка..." : "Обработать CSV"}
+                {isProcessing ? (
+                    <>
+                        <Loader />
+                        Обработка...
+                    </>
+                ) : (
+                    "Обработать CSV"
+                )}
             </button>
+
+            {/* CSS анимация для спиннера */}
+            <style>{`
+                @keyframes spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
+            `}</style>
         </div>
     );
 }
