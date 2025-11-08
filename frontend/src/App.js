@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { io } from "socket.io-client";
 
-// Подключение к вашему хостингу
+
+// Подключение к вашему серверу
 const socket = io("https://web-application-f.onrender.com", {
   transports: ["websocket"],
   autoConnect: false,
@@ -26,7 +27,7 @@ function App() {
     }
   };
 
-  // Обработчик отправки файла на сервер
+  // Отправка файла на сервер
   const handleUpload = () => {
     if (!file) {
       setError("Сначала загрузите файл CSV");
@@ -37,13 +38,11 @@ function App() {
     setProgress(0);
     setError("");
 
-    // Читаем файл как ArrayBuffer
     const reader = new FileReader();
     reader.onload = () => {
       const arrayBuffer = reader.result;
-
-      // Подключаемся к серверу и отправляем файл
       socket.connect();
+
       socket.emit("upload_file", {
         file: Array.from(new Uint8Array(arrayBuffer)),
         filename: file.name,
@@ -52,16 +51,18 @@ function App() {
     reader.readAsArrayBuffer(file);
   };
 
-  // Обработчики событий от сервера
+  // Обработка событий от сервера
   useEffect(() => {
     // Обновление прогресса
     socket.on("progress", (data) => {
-      setProgress(data.percent);
+      console.log("Прогресс:", data.percent); // Отладка
+      setProgress(data.percent || 0);
     });
 
-    // Ошибка на сервере
+    // Ошибка
     socket.on("error", (data) => {
-      setError(data.message || "Произошла ошибка на сервере");
+      console.error("Ошибка:", data.message);
+      setError(data.message || "Произошла ошибка");
       setIsUploading(false);
       setProgress(0);
     });
@@ -69,12 +70,9 @@ function App() {
     // Готовый файл
     socket.on("file_ready", (data) => {
       try {
-        // Создаём Blob из байтов
         const blob = new Blob([new Uint8Array(data.data)], {
           type: "text/csv;charset=utf-8",
         });
-
-        // Скачиваем файл
         const url = window.URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
@@ -93,63 +91,55 @@ function App() {
       }
     });
 
-    // Отключаемся при размонтировании
     return () => {
       socket.disconnect();
     };
   }, []);
 
-  // Компонент спиннера
-  const ProcessingSpinner = () => (
-    <div
-      style={{
-        display: "inline-block",
-        width: "20px",
-        height: "20px",
-        border: "3px solid #fff",
-        borderTopColor: "#007bff",
-        borderRadius: "50%",
-        animation: "spin 1s linear infinite",
-        marginRight: "8px",
-        verticalAlign: "middle",
-      }}
-    />
-  );
-
-  // Полоса прогресса
+  // Компонент полосы прогресса
   const ProgressBar = () => (
     <div
       style={{
-        marginTop: "10px",
+        marginTop: "15px",
         width: "100%",
         backgroundColor: "#e0e0e0",
-        borderRadius: "4px",
+        borderRadius: "8px",
         overflow: "hidden",
+        boxShadow: "0 2px 4px rgba(0,0,0,0.1)",
       }}
     >
       <div
         style={{
-          height: "10px",
+          height: "20px",
           width: `${progress}%`,
-          backgroundColor: progress >= 100 ? "#4caf50" : "#2196f3",
+          backgroundColor: progress >= 100 ? "#4caf50" : "#1976d2",
           transition: "width 0.3s ease-out",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "white",
+          fontSize: "14px",
         }}
-      />
+      >
+        {progress}%
+      </div>
     </div>
   );
 
   return (
-    <div style={{ padding: "20px", fontFamily: "Arial, sans-serif" }}>
-      <h1>Обработка CSV-файла</h1>
+    <div style={{ padding: "30px", fontFamily: "Arial, sans-serif", maxWidth: "600px", margin: "0 auto" }}>
+      <h1 style={{ textAlign: "center" }}>Обработка CSV-файла</h1>
+
 
       {error && (
         <div
           style={{
-            color: "red",
             backgroundColor: "#ffecec",
-            padding: "10px",
-            borderRadius: "4px",
-            marginBottom: "15px",
+            color: "#d32f2f",
+            padding: "15px",
+            borderRadius: "8px",
+            marginBottom: "20px",
+            border: "1px solid #ffcdd2",
           }}
         >
           {error}
@@ -161,14 +151,18 @@ function App() {
         accept=".csv"
         onChange={handleFileChange}
         disabled={isUploading}
-        style={{ marginBottom: "15px" }}
+        style={{
+          width: "100%",
+          padding: "12px",
+          border: "2px dashed #1976d2",
+          borderRadius: "8px",
+          marginBottom: "20px",
+          cursor: isUploading ? "not-allowed" : "pointer",
+        }}
       />
 
       {isUploading && (
-        <div style={{ marginBottom: "15px" }}>
-          <p style={{ margin: "5px 0", fontSize: "14px" }}>
-            Прогресс: {progress}%
-          </p>
+        <div style={{ marginBottom: "20px" }}>
           <ProgressBar />
         </div>
       )}
@@ -177,46 +171,33 @@ function App() {
         onClick={handleUpload}
         disabled={!file || isUploading}
         style={{
-          padding: "10px 20px",
-          backgroundColor: isUploading ? "#6c757d" : "#007bff",
+          width: "100%",
+          padding: "15px",
+          backgroundColor: isUploading ? "#bdbdbd" : "#1976d2",
           color: "white",
           border: "none",
-          borderRadius: "4px",
+          borderRadius: "8px",
           cursor: isUploading ? "not-allowed" : "pointer",
-          display: "flex",
-          alignItems: "center",
-          gap: "8px",
+          fontSize: "16px",
+          fontWeight: "bold",
         }}
       >
-        {isUploading ? (
-          <>
-            <ProcessingSpinner />
-            Идет обработка...
-          </>
-        ) : (
-          "Загрузить и обработать"
-        )}
+        {isUploading ? `Идет обработка... (${progress}%)` : "Загрузить и обработать"}
       </button>
 
       {resultFile && (
         <p
           style={{
-            marginTop: "20px",
-            color: "#28a745",
-            fontSize: "16px",
-            fontWeight: "bold",
+            marginTop: "25px",
+            textAlign: "center",
+            color: "#2e7d32",
+            fontSize: "18px",
+            fontWeight: "500",
           }}
         >
           Файл "{resultFile}" успешно обработан и скачан!
         </p>
       )}
-
-      <style>{`
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-      `}</style>
     </div>
   );
 }
