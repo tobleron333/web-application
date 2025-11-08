@@ -79,7 +79,7 @@ def process_csv():
 
     file = request.files['file']
 
-    chunk_size = 50
+    chunk_size = 500
     results = []
 
     for chunk in pd.read_csv(file, sep=';', chunksize=chunk_size, dtype={'№ вопроса': 'Int64'}):
