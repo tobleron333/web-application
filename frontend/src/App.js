@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from "react";
 import { io } from "socket.io-client";
 
-
 // Подключение к вашему серверу
 const socket = io("https://web-application-f.onrender.com", {
   transports: ["websocket"],
-  autoConnect: false,
+  reconnection: true,
+  reconnectionAttempts: 5,
 });
 
 function App() {
@@ -55,14 +55,14 @@ function App() {
   useEffect(() => {
     // Обновление прогресса
     socket.on("progress", (data) => {
-      console.log("Прогресс:", data.percent); // Отладка
+      console.log("Получен прогресс:", data.percent);
       setProgress(data.percent || 0);
     });
 
-    // Ошибка
+    // Ошибка на сервере
     socket.on("error", (data) => {
-      console.error("Ошибка:", data.message);
-      setError(data.message || "Произошла ошибка");
+      console.error("Ошибка сервера:", data.message);
+      setError(data.message || "Произошла ошибка на сервере");
       setIsUploading(false);
       setProgress(0);
     });
@@ -70,9 +70,12 @@ function App() {
     // Готовый файл
     socket.on("file_ready", (data) => {
       try {
+        // Создаём Blob из байтов
         const blob = new Blob([new Uint8Array(data.data)], {
           type: "text/csv;charset=utf-8",
         });
+
+        // Скачиваем файл
         const url = window.URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
@@ -91,12 +94,30 @@ function App() {
       }
     });
 
+    // Отключаемся при размонтировании
     return () => {
       socket.disconnect();
     };
   }, []);
 
-  // Компонент полосы прогресса
+  // Компонент спиннера
+  const ProcessingSpinner = () => (
+    <div
+      style={{
+        display: "inline-block",
+        width: "20px",
+        height: "20px",
+        border: "3px solid #fff",
+        borderTopColor: "#007bff",
+        borderRadius: "50%",
+        animation: "spin 1s linear infinite",
+        marginRight: "8px",
+        verticalAlign: "middle",
+      }}
+    />
+  );
+
+  // Полоса прогресса
   const ProgressBar = () => (
     <div
       style={{
@@ -110,7 +131,7 @@ function App() {
     >
       <div
         style={{
-          height: "20px",
+          height: "24px",
           width: `${progress}%`,
           backgroundColor: progress >= 100 ? "#4caf50" : "#1976d2",
           transition: "width 0.3s ease-out",
@@ -130,7 +151,6 @@ function App() {
     <div style={{ padding: "30px", fontFamily: "Arial, sans-serif", maxWidth: "600px", margin: "0 auto" }}>
       <h1 style={{ textAlign: "center" }}>Обработка CSV-файла</h1>
 
-
       {error && (
         <div
           style={{
@@ -140,6 +160,7 @@ function App() {
             borderRadius: "8px",
             marginBottom: "20px",
             border: "1px solid #ffcdd2",
+            textAlign: "left",
           }}
         >
           {error}
@@ -158,6 +179,7 @@ function App() {
           borderRadius: "8px",
           marginBottom: "20px",
           cursor: isUploading ? "not-allowed" : "pointer",
+          boxSizing: "border-box",
         }}
       />
 
@@ -180,9 +202,17 @@ function App() {
           cursor: isUploading ? "not-allowed" : "pointer",
           fontSize: "16px",
           fontWeight: "bold",
+          marginTop: "10px",
         }}
       >
-        {isUploading ? `Идет обработка... (${progress}%)` : "Загрузить и обработать"}
+        {isUploading ? (
+          <>
+            <ProcessingSpinner />
+            Идет обработка... ({progress}%)
+          </>
+        ) : (
+          "Загрузить и обработать"
+        )}
       </button>
 
       {resultFile && (
@@ -198,9 +228,17 @@ function App() {
           Файл "{resultFile}" успешно обработан и скачан!
         </p>
       )}
+
+      <style>{`
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
 
 export default App;
+
 
