@@ -76,7 +76,7 @@ def process_csv():
         return {'error': 'Файл не загружен'}, 400
 
     file = request.files['file']
-    chunk_size = 3000 # Уменьшено для надёжности
+    chunk_size = 300
     results = []
 
     for chunk in pd.read_csv(file, sep=';', chunksize=chunk_size, dtype={'№ вопроса': 'Int64'}):
